@@ -25,7 +25,7 @@ namespace UnityEngine.Splines
             public TangentMode Mode;
             public float Tension;
 
-            [SerializeField, FormerlySerializedAs("DistanceToInterpolation")]
+            [NonSerialized]
             DistanceToInterpolation[] m_DistanceToInterpolation = new DistanceToInterpolation[k_CurveDistanceLutResolution];
 
             public DistanceToInterpolation[] DistanceToInterpolation
