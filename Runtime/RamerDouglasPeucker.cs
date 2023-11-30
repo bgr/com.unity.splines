@@ -4,10 +4,10 @@ using Unity.Mathematics;
 
 namespace UnityEngine.Splines
 {
-    class RamerDouglasPeucker<T> where T : IList<float3>
+    public class RamerDouglasPeucker<T> where T : IList<float3>
     {
         T m_Points;
-        bool[] m_Keep;
+        public bool[] m_Keep;
         float m_Epsilon;
         int m_KeepCount;
 
