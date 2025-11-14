@@ -219,6 +219,11 @@ namespace UnityEditor.Splines
             SplineHandleUtility.canDrawOnCurves = true;
         }
 
+        /// <summary>
+        /// The distance at which to stop drawing knots in Scene View, as an optimization to not slow down the editor.
+        /// </summary>
+        public static float knotDrawDistance = 1500f;
+
         static void DrawSplineElements(SplineInfo splineInfo)
         {
             var spline = splineInfo.Spline;
@@ -226,8 +231,27 @@ namespace UnityEditor.Splines
 
             if (drawHandlesAsActive)
             {
+                var cam = SceneView.currentDrawingSceneView.camera;
+                float threshold = knotDrawDistance * knotDrawDistance;
+                const float m = 0.05f; // magic tweak - allow points that are just a bit outside the screen
+
                 for (int knotIndex = 0; knotIndex < spline.Count; ++knotIndex)
+                {
+                    var knot = spline[knotIndex];
+                    float dist = ((Vector3)knot.Position - cam.transform.position).sqrMagnitude;
+
+                    // skip drawing knots that are too far from camera (optimization for containers with a lot of curves)
+                    if (dist > threshold) continue;
+
+                    // skip drawing knots that are out of camera frustum
+                    Vector3 viewportPoint = cam.WorldToViewportPoint(knot.Position);
+                    bool isInFrustum = viewportPoint.x >= 0 - m && viewportPoint.x <= 1 + m &&
+                                       viewportPoint.y >= 0 - m && viewportPoint.y <= 1 + m &&
+                                       viewportPoint.z > 0;
+                    if (!isInFrustum) continue;
+
                     DrawKnotWithTangentsHandles_Internal(new SelectableKnot(splineInfo, knotIndex));
+                }
             }
             else
             {
