@@ -12,13 +12,14 @@ namespace UnityEditor.Splines
         // ReSharper disable once Unity.ParameterNotDerivedFromComponent
         static void DrawUnselectedSplineGizmos(ISplineContainer provider, GizmoType gizmoType)
         {
+            bool isToolActive = typeof(SplineTool).IsAssignableFrom(ToolManager.activeToolType);
             //Skip if tool engaged is a spline tool
-            if (typeof(SplineTool).IsAssignableFrom(ToolManager.activeToolType) && !showSelectedGizmo && (gizmoType & GizmoType.Selected) > 0)
-                return;
+            // if (typeof(SplineTool).IsAssignableFrom(ToolManager.activeToolType) && !showSelectedGizmo && (gizmoType & GizmoType.Selected) > 0)
+            //     return;
 
             var prev = Gizmos.color;
             Gizmos.color = (gizmoType & (GizmoType.Selected | GizmoType.Active)) > 0
-                ? Handles.selectedColor
+                ? (isToolActive ? SplineHandleUtility.lineColor : Handles.selectedColor)
                 : SplineGizmoUtility.s_GizmosLineColor.value;
             SplineGizmoUtility.DrawGizmos(provider);
             Gizmos.color = prev;

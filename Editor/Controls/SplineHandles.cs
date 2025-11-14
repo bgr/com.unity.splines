@@ -4,6 +4,7 @@ using UnityEngine;
 using UnityEngine.Profiling;
 using UnityEngine.Rendering;
 using UnityEngine.Splines;
+using Object = System.Object;
 
 namespace UnityEditor.Splines
 {
@@ -83,6 +84,9 @@ namespace UnityEditor.Splines
             s_KnotsIDs.Clear();
         }
 
+        static Event lastHandledEvent;
+
+
         /// <summary>
         /// Creates handles for a set of splines. These handles display the knots, tangents, and segments of a spline.
         /// These handles support selection and the direct manipulation of spline elements.
@@ -90,17 +94,31 @@ namespace UnityEditor.Splines
         /// <param name="splines">The set of splines to draw handles for.</param>
         public static void DoHandles(IReadOnlyList<SplineInfo> splines)
         {
-            Profiler.BeginSample("SplineHandles.DoHandles");
+            // if (Event.current.type == EventType.Layout) return;
+            if (lastHandledEvent != null && Event.current.type == lastHandledEvent.type)
+            {
+                Debug.Log($"Same {Event.current} & {lastHandledEvent}");
+                lastHandledEvent = new Event(Event.current);
+                return;
+            }
+            lastHandledEvent = new Event(Event.current);
+            if (Event.current.type == EventType.Repaint) Debug.Log("-------------------");
+
+            Profiler.BeginSample($"SplineHandles.DoHandles Unity Sucks: {Event.current}");
             using (new SplineHandleScope())
             {
                 // Drawing done in two separate passes to make sure the curves are drawn behind the spline elements.
                 // Draw the curves.
                 for (int i = 0; i < splines.Count; ++i)
                 {
+                    Profiler.BeginSample("SplineHandles.DoHandles for loop iteration");
                     DoSegmentsHandles(splines[i]);
+                    Profiler.EndSample();
                 }
 
+                Profiler.BeginSample("SplineHandles.DoKnotsAndTangentsHandles");
                 DoKnotsAndTangentsHandles(splines);
+                Profiler.EndSample();
             }
             Profiler.EndSample();
         }
@@ -141,6 +159,91 @@ namespace UnityEditor.Splines
             KnotHandles.DrawVisibleKnots();
         }
 
+        static List<int> _GetSampleIndices(int knotCount)
+        {
+            var indices = new List<int>();
+
+            // Small splines: just check all knots
+            if (knotCount <= 3)
+            {
+                for (int i = 0; i < knotCount; i++)
+                    indices.Add(i);
+
+                return indices;
+            }
+
+            // For longer splines, sample a handful of knots
+            int sampleCount = 3 + Mathf.CeilToInt(Mathf.Log(knotCount, 2));
+            sampleCount = Mathf.Clamp(sampleCount, 4, 10); // 4–10 samples
+
+            // Evenly distributed indices
+            for (int i = 0; i < sampleCount; i++)
+            {
+                float t = (float)i / (sampleCount - 1);
+                int index = Mathf.RoundToInt(t * (knotCount - 1));
+
+                if (!indices.Contains(index))
+                    indices.Add(index);
+            }
+
+            return indices;
+        }
+
+        static bool _IsAnyKnotCloseToCamera(float maxDistance, Camera cam, Spline spline, Transform splineTransform)
+        {
+            int knotCount = spline.Count;
+
+            // decide how many knots to check, for small splines (10 knots) it'll check 5 knots,
+            // for large splines (100 knots) it'll check 8 knots, for 1000 knots it'll check 11 knots
+            int sampleCount = 1 + Mathf.CeilToInt(Mathf.Log(knotCount, 2));
+            for (int i = 0; i < sampleCount; i++)
+            {
+                float t = (float)i / (sampleCount - 1);
+                int index = Mathf.Clamp(Mathf.RoundToInt(t * (knotCount - 1)), 0, knotCount - 1);
+
+                BezierKnot knot = spline[index];
+                Vector3 localPos = knot.Position;
+                Vector3 worldPos = splineTransform.TransformPoint(localPos);
+
+                if (Vector3.Distance(worldPos, cam.transform.position) < maxDistance && _IsPointInFrustum(worldPos, cam))
+                    return true;
+            }
+
+            return false;
+        }
+
+        static bool _IsAnyPointCloseToCamera(float maxDistanceSquared, Camera cam, Vector3[] points, Transform splineTransform)
+        {
+            // decide how many knots to check, for small splines (10 knots) it'll check 5 knots,
+            // for large splines (100 knots) it'll check 8 knots, for 1000 knots it'll check 11 knots
+            int sampleCount = 1 + Mathf.CeilToInt(Mathf.Log(points.Length, 2));
+            for (int s = 0; s < sampleCount; s++)
+            {
+                float t = (float)s / (sampleCount - 1);
+                int index = Mathf.Clamp(Mathf.RoundToInt(t * (points.Length - 1)), 0, points.Length - 1);
+
+                Vector3 localPos = points[index];
+                Vector3 worldPos = splineTransform.TransformPoint(localPos);  // TODO check is it needed
+
+                if ((worldPos - cam.transform.position).sqrMagnitude < maxDistanceSquared && _IsPointInFrustum(worldPos, cam))
+                    return true;
+            }
+
+            return false;
+        }
+
+        static bool _IsPointInFrustum(Vector3 worldPos, Camera cam)
+        {
+            Vector3 viewportPos = cam.WorldToViewportPoint(worldPos);
+
+            if (viewportPos.z <= 0f)
+                return false;
+
+            const float m = 0.05f; // magic tweak - allow points that are just a bit outside the screen
+            return viewportPos.x >= -m && viewportPos.x <= 1f + m &&
+                   viewportPos.y >= -m && viewportPos.y <= 1f + m;
+        }
+
         /// <summary>
         /// Creates segment handles for a spline. Call `DoCurvesHandles` in a `SplineHandleScope`.
         /// This method is used internally by `DrawHandles`.
@@ -152,6 +255,35 @@ namespace UnityEditor.Splines
             if (spline == null || spline.Count < 2)
                 return;
 
+            if (SceneView.currentDrawingSceneView == null) return;
+            var cam = SceneView.currentDrawingSceneView.camera;
+            if (cam == null) return;
+
+            Profiler.BeginSample("DoSegmentsHandles 0");
+
+            // skip drawing splines that are outside the screen (optimization for containers with a lot of curves)
+            SplineCacheUtility.GetCachedPositions(spline, out var positions);
+            Profiler.EndSample();
+
+            // var bounds = spline.GetBounds();
+            // Plane[] planes = GeometryUtility.CalculateFrustumPlanes(cam);
+            // if (!GeometryUtility.TestPlanesAABB(planes, bounds))
+            // {
+            //     Profiler.EndSample();
+            //     return;
+            // }
+            // Profiler.EndSample();
+
+            Profiler.BeginSample("DoSegmentsHandles 1 - IsFar");
+            // optimize drawing of splines that are far from the camera (all its knots are further than threshold)
+            // bool isNearCamera = _IsAnyKnotCloseToCamera(knotDrawDistance, cam, spline, splineInfo.Transform);
+            float threshold = knotDrawDistance * knotDrawDistance;
+            bool isNearCamera = _IsAnyPointCloseToCamera(threshold, cam, positions, splineInfo.Transform);
+            Profiler.EndSample();
+
+            if (!isNearCamera) return;
+
+            Profiler.BeginSample("DoSegmentsHandles 1");
             var localToWorld = splineInfo.LocalToWorld;
 
             // If the spline isn't closed, skip the last index of the spline
@@ -166,7 +298,9 @@ namespace UnityEditor.Splines
                     mesh.Do(nativeSpline, SplineHandleSettings.SplineMeshSize, SplineHandleSettings.SplineMeshColor, SplineHandleSettings.SplineMeshResolution);
                 }
             }
+            Profiler.EndSample();
 
+            Profiler.BeginSample("DoSegmentsHandles 2");
             s_ControlIDs.Clear();
             for (int idIndex = 0; idIndex < lastIndex + 1; ++idIndex)
             {
@@ -174,35 +308,61 @@ namespace UnityEditor.Splines
                 s_ControlIDs.Add(id);
                 s_CurveIDs.Add(id);
             }
+            Profiler.EndSample();
+
+            Profiler.BeginSample("DoSegmentsHandles 3");
 
             var drawHandlesAsActive = !SplineSelection.HasActiveSplineSelection() || SplineSelection.Contains(splineInfo);
 
             //Draw all the curves at once
-            SplineCacheUtility.GetCachedPositions(spline, out var positions);
+            Profiler.EndSample();
+
+            Profiler.BeginSample("DoSegmentsHandles 3.1");
 
             using (new Handles.DrawingScope(SplineHandleUtility.lineColor, localToWorld))
             {
-                using (new ZTestScope(CompareFunction.Less))
-                    Handles.DrawAAPolyLine(SplineHandleUtility.denseLineAATex, 4f, positions);
+                // using (new ZTestScope(CompareFunction.Less))
+                //     Handles.DrawAAPolyLine(SplineHandleUtility.denseLineAATex, 4f, positions);
             }
+            Profiler.EndSample();
 
-            using (new Handles.DrawingScope(SplineHandleUtility.lineBehindColor, localToWorld))
-            {
-                using (new ZTestScope(CompareFunction.Greater))
-                    Handles.DrawAAPolyLine(SplineHandleUtility.denseLineAATex, 4f, positions);
-            }
+            Profiler.BeginSample("DoSegmentsHandles 4");
 
-            if (drawHandlesAsActive)
+
+            // if (UnityEngine.Event.current.type == UnityEngine.EventType.Repaint)
+            // {
+            //     var prev = Gizmos.color;
+            //     Gizmos.color = Handles.selectedColor;
+            //     Gizmos.DrawLineStrip(positions, false);
+            //     Gizmos.color = prev;
+            // }
+
+            // using (new Handles.DrawingScope(SplineHandleUtility.lineBehindColor, localToWorld))
+            // {
+            //     using (new ZTestScope(CompareFunction.Greater))
+            //         Handles.DrawAAPolyLine(SplineHandleUtility.denseLineAATex, 4f, positions);
+            // }
+            Profiler.EndSample();
+
+            Profiler.BeginSample("DoSegmentsHandles 5");
+
+            if (drawHandlesAsActive && Event.current.type == EventType.Repaint)
             {
                 for (int curveIndex = 0; curveIndex < lastIndex + 1; ++curveIndex)
                 {
+                    var curve = spline.GetCurve(curveIndex).Transform(localToWorld);
+                    if (((Vector3)curve.P0 - cam.transform.position).sqrMagnitude > threshold &&
+                        ((Vector3)curve.P3 - cam.transform.position).sqrMagnitude > threshold) continue;
+
                     if (SplineHandleSettings.FlowDirectionEnabled && Event.current.type == EventType.Repaint)
                     {
-                        var curve = spline.GetCurve(curveIndex).Transform(localToWorld);
                         CurveHandles.DrawFlow(curve, spline, curveIndex);
                     }
                 }
             }
+            Profiler.EndSample();
+
+            Profiler.BeginSample("DoSegmentsHandles 6");
 
             for (int curveIndex = 0; curveIndex < lastIndex + 1; ++curveIndex)
             {
@@ -213,10 +373,11 @@ namespace UnityEditor.Splines
                     localToWorld,
                     new SelectableKnot(splineInfo, curveIndex),
                     new SelectableKnot(splineInfo, SplineUtility.NextIndex(curveIndex, spline.Count, spline.Closed)),
-                    drawHandlesAsActive);
+                    drawHandlesAsActive && isNearCamera);
             }
 
             SplineHandleUtility.canDrawOnCurves = true;
+            Profiler.EndSample();
         }
 
         /// <summary>
@@ -229,34 +390,28 @@ namespace UnityEditor.Splines
             var spline = splineInfo.Spline;
             var drawHandlesAsActive = !SplineSelection.HasActiveSplineSelection() || SplineSelection.Contains(splineInfo);
 
-            if (drawHandlesAsActive)
+            var cam = SceneView.currentDrawingSceneView.camera;
+            float threshold = knotDrawDistance * knotDrawDistance;
+
+            for (int knotIndex = 0; knotIndex < spline.Count; ++knotIndex)
             {
-                var cam = SceneView.currentDrawingSceneView.camera;
-                float threshold = knotDrawDistance * knotDrawDistance;
-                const float m = 0.05f; // magic tweak - allow points that are just a bit outside the screen
+                var knot = spline[knotIndex];
+                float dist = ((Vector3)knot.Position - cam.transform.position).sqrMagnitude;
 
-                for (int knotIndex = 0; knotIndex < spline.Count; ++knotIndex)
+                // skip drawing knots that are too far from camera (optimization for containers with a lot of curves)
+                if (dist > threshold) continue;
+
+                // skip drawing knots that are out of camera frustum
+                if (!_IsPointInFrustum(knot.Position, cam)) continue;
+
+                if (drawHandlesAsActive)
                 {
-                    var knot = spline[knotIndex];
-                    float dist = ((Vector3)knot.Position - cam.transform.position).sqrMagnitude;
-
-                    // skip drawing knots that are too far from camera (optimization for containers with a lot of curves)
-                    if (dist > threshold) continue;
-
-                    // skip drawing knots that are out of camera frustum
-                    Vector3 viewportPoint = cam.WorldToViewportPoint(knot.Position);
-                    bool isInFrustum = viewportPoint.x >= 0 - m && viewportPoint.x <= 1 + m &&
-                                       viewportPoint.y >= 0 - m && viewportPoint.y <= 1 + m &&
-                                       viewportPoint.z > 0;
-                    if (!isInFrustum) continue;
-
                     DrawKnotWithTangentsHandles_Internal(new SelectableKnot(splineInfo, knotIndex));
                 }
-            }
-            else
-            {
-                for (int knotIndex = 0; knotIndex < spline.Count; ++knotIndex)
+                else
+                {
                     KnotHandles.DrawInformativeKnot(new SelectableKnot(splineInfo, knotIndex));
+                }
             }
         }
 
