@@ -62,6 +62,7 @@ namespace UnityEditor.Splines
         /// </summary>
         public static bool useCustomSplineHandles
         {
+            get => s_UseCustomSplineHandles;
             set => s_UseCustomSplineHandles = value;
         }
 
